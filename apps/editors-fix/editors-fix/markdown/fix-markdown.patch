@@ -1,0 +1,404 @@
+diff -ru ed_orig/markdown/markdown/src/renderer/App.tsx ed/markdown/markdown/src/renderer/App.tsx
+--- ed_orig/markdown/markdown/src/renderer/App.tsx	2026-11-03 07:31:04.125272543 +0000
++++ ed/markdown/markdown/src/renderer/App.tsx	2026-11-03 07:31:34.690584599 +0000
+@@ -65,6 +65,13 @@
+ import type { ExportFormat, SaveMode } from '../shared/ipc'
+ import { uiOp } from './editor/ops'
+ 
++// ───────── AI 기능 제거용 더미 선언 (원본 AI 모듈이 없어 생기던 ReferenceError 방지) ─────────
++type AiPreset = { text: string; nonce: number }
++type EditQueueItem = { qid: string; instruction: string; capturedText: string }
++const aiPanelInitiallyOpen = (_key: string): boolean => false
++const useAiSidebarEnabled = (_setOpen: (open: boolean) => void): boolean => false
++const rememberAiPanelOpen = (_key: string, _open: boolean): void => {}
++
+ type LoadStatus = 'loading' | 'ready' | 'error'
+ type SaveState = 'idle' | 'saving' | 'saved' | 'failed'
+ 
+@@ -1184,51 +1191,6 @@
+     }
+   }, [autoSave, filePath, doSave])
+ 
+-  // ---- selection-scoped AI edit queue (anchors live in the editor as decorations) ----
+-  const getQueueItem = useCallback(
+-    (qid: string) => editQueueRef.current.find((item) => item.qid === qid),
+-    [],
+-  )
+-  const queueAdd = useCallback((instruction: string): void => {
+-    const current = editorRef.current
+-    if (!current) return
+-    const { from, to, empty } = current.state.selection
+-    if (empty || editQueueRef.current.length >= EDIT_QUEUE_MAX) return
+-    const qid = `q${++queueSeqRef.current}`
+-    addQueueAnchor(current, qid, from, to)
+-    const capturedText = current.state.doc
+-      .textBetween(from, to, ' ', ' ')
+-      .replace(/\s+/g, ' ')
+-      .trim()
+-      .slice(0, 80)
+-    setEditQueue((queue) => [...queue, { qid, instruction, capturedText }])
+-  }, [])
+-  const queueUpdate = useCallback(
+-    (qid: string, instruction: string): void =>
+-      setEditQueue((queue) => queue.map((i) => (i.qid === qid ? { ...i, instruction } : i))),
+-    [],
+-  )
+-  const queueRemove = useCallback((qid: string): void => {
+-    if (editorRef.current) removeQueueAnchors(editorRef.current, [qid])
+-    setEditQueue((queue) => queue.filter((i) => i.qid !== qid))
+-  }, [])
+-  const queueClear = useCallback((): void => {
+-    if (editorRef.current) clearQueueAnchors(editorRef.current)
+-    setEditQueue([])
+-  }, [])
+-  /** a submission hands its items to the run and drops them from the queue */
+-  const queueConsume = useCallback((qids: string[]): void => {
+-    if (editorRef.current) removeQueueAnchors(editorRef.current, qids)
+-    setEditQueue((queue) => queue.filter((i) => !qids.includes(i.qid)))
+-  }, [])
+-  const queueFocus = useCallback((qid: string): void => {
+-    const current = editorRef.current
+-    if (!current) return
+-    const selection = selectionForAnchor(current, qid)
+-    if (!selection) return
+-    current.view.dispatch(current.state.tr.setSelection(selection).scrollIntoView())
+-    current.view.focus()
+-  }, [])
+   /** outline click: move the cursor into the heading and scroll it into view */
+   const jumpToOutline = useCallback((pos: number): void => {
+     const current = editorRef.current
+@@ -1237,45 +1199,7 @@
+     current.view.dispatch(current.state.tr.setSelection(selection).scrollIntoView())
+     current.view.focus()
+   }, [])
+-  const askSendNow = useCallback((text: string): void => {
+-    setAiOpen(true)
+-    setAiPreset((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1 }))
+-  }, [])
+ 
+-  const aiDeps: MarkdownAiDeps = {
+-    getEditor: () => editorRef.current,
+-    // envelopeRef, not fmText state: a write-then-read within one AI run must
+-    // see the new value before React commits
+-    getFrontmatter: () => frontmatterInner(envelopeRef.current.frontmatter),
+-    setFrontmatter: (inner) => {
+-      onFrontmatterChange(inner)
+-      setFmOpen(inner.trim() !== '')
+-    },
+-    // snapshots carry body + the raw frontmatter block (structured, no
+-    // file-text round-trip) so a rollback also reverts set_frontmatter and
+-    // an untouched block restores byte-for-byte
+-    getSnapshot: () => ({
+-      body: editorRef.current ? bodyMarkdown(editorRef.current) : '',
+-      frontmatter: envelopeRef.current.frontmatter,
+-    }),
+-    restoreSnapshot: (snapshot) => {
+-      const current = editorRef.current
+-      if (!current) return
+-      envelopeRef.current.frontmatter = snapshot.frontmatter
+-      const inner = frontmatterInner(snapshot.frontmatter)
+-      setFmText(inner)
+-      setFmOpen(inner !== '')
+-      current.commands.setContent(snapshot.body, { contentType: 'markdown' })
+-      sourceMapRef.current = buildSourceMap(current, current.state.doc, snapshot.body)
+-      markDirty()
+-    },
+-    onRunDone: (mutated) => {
+-      // AI wrote into a never-saved document → name it from the content and save silently
+-      if (!mutated || filePathRef.current || !editorRef.current) return
+-      const name = deriveAutoFileName(editorRef.current)
+-      if (name) void doSave('save', name)
+-    },
+-  }
+ 
+   const fileName = filePath ? filePath.replace(/^.*[/\\]/, '') : null
+   const statusText =
+@@ -1343,12 +1267,6 @@
+         onToggleSpellcheck={() => setSpellcheck((v) => !v)}
+         sourceMode={sourceMode}
+         sourceHistory={sourceMode ? sourceHistory : undefined}
+-        aiOpen={aiOpen}
+-        onToggleAi={() => setAiOpen((v) => !v)}
+-        onAiPreset={(text) => {
+-          setAiOpen(true)
+-          setAiPreset((prev) => ({ text, nonce: (prev?.nonce ?? 0) + 1 }))
+-        }}
+         redactEnabled={redactEnabled}
+         onToggleRedact={(on) => {
+           setRedactEnabled(on)
+@@ -1357,37 +1275,6 @@
+       />
+       {status === 'loading' && <div className="center-note">{t('loading')}</div>}
+       <div className="app-main" style={status === 'ready' ? undefined : { display: 'none' }}>
+-        <div
+-          className={`ai-dock${aiOpen ? '' : ' collapsed'}${
+-            !aiSidebarEnabled && !aiOpen ? ' ai-dock-off' : ''
+-          }`}
+-        >
+-          {!aiOpen && aiSidebarEnabled && (
+-            <button
+-              className="ai-rail"
+-              data-tip={t('aiOpenAssistant')}
+-              aria-label={t('aiOpenAssistant')}
+-              onClick={() => setAiOpen(true)}
+-            >
+-              <GensparkMark size={22} />
+-            </button>
+-          )}
+-          {/* mounted only after the file is loaded so chat history resolves against the real path */}
+-          {status === 'ready' && (
+-            <AiPanel
+-              deps={aiDeps}
+-              filePath={filePath}
+-              preset={aiPreset}
+-              onCollapse={() => setAiOpen(false)}
+-              editQueue={editQueue}
+-              onQueueEditInstruction={queueUpdate}
+-              onQueueRemove={queueRemove}
+-              onQueueClear={queueClear}
+-              onQueueFocus={queueFocus}
+-              onQueueConsume={queueConsume}
+-            />
+-          )}
+-        </div>
+         {outlineOpen && !sourceMode && (
+           <OutlinePane
+             items={outlineItems}
+@@ -1561,17 +1448,6 @@
+         />
+       )}
+       {!sourceMode && <TableMenu editor={editor} scrollRef={scrollRef} zoom={zoom} />}
+-      {editor && !sourceMode && status === 'ready' && (
+-        <AiAskPopover
+-          editor={editor}
+-          queueFull={editQueue.length >= EDIT_QUEUE_MAX}
+-          getItem={getQueueItem}
+-          onSendNow={askSendNow}
+-          onQueueAdd={queueAdd}
+-          onQueueUpdate={queueUpdate}
+-          onQueueRemove={queueRemove}
+-        />
+-      )}
+     </div>
+   )
+ }
+diff -ru ed_orig/markdown/markdown/src/renderer/components/Ribbon.tsx ed/markdown/markdown/src/renderer/components/Ribbon.tsx
+--- ed_orig/markdown/markdown/src/renderer/components/Ribbon.tsx	2026-11-03 07:31:04.125431245 +0000
++++ ed/markdown/markdown/src/renderer/components/Ribbon.tsx	2026-11-03 07:31:34.690987758 +0000
+@@ -71,7 +71,6 @@
+   onToggleSpellcheck: () => void
+   mdTheme: MarkdownTheme
+   onMarkdownTheme: (theme: MarkdownTheme) => void
+-  aiOpen: boolean
+   /**
+    * A .txt/.json is edited as source, so every button that formats a block
+    * document is hidden rather than left there to act on a document that does
+@@ -116,55 +115,6 @@
+ const toggleList = (editor: Editor | null, list: ListKind) =>
+   editor && uiOp(editor, { op: 'toggleList', target: 'selection', list })
+ 
+-/** doc + sparkle / pen + sparkle / lines + sparkle, same glyphs as the docs ribbon */
+-function AiFeatureIcon({ kind }: { kind: 'summarize' | 'polish' | 'tidy' | 'mindmap' }) {
+-  return (
+-    <svg
+-      viewBox="0 0 24 24"
+-      fill="none"
+-      stroke="currentColor"
+-      strokeWidth="1.5"
+-      strokeLinecap="round"
+-      strokeLinejoin="round"
+-      aria-hidden
+-    >
+-      {kind === 'summarize' && (
+-        <>
+-          <path d="M13.875 21H6.5C5.39543 21 4.5 20.1046 4.5 19V5C4.5 3.89543 5.39543 3 6.5 3H17.5C18.6046 3 19.5 3.89543 19.5 5V13" />
+-          <path d="M8 7H16" />
+-          <path d="M8 10.2H14" />
+-          <path d="M8 13.4H12" />
+-        </>
+-      )}
+-      {kind === 'polish' && (
+-        <>
+-          <path d="M5.00012 20.7481L8.80319 20.7482L21.7482 7.80317L17.945 4L5 16.945L5.00012 20.7481Z" />
+-          <path d="M15.1406 6.80469L18.9438 10.6079" />
+-          <path d="M8 3L8.22106 3.59745C8.51094 4.38087 8.65589 4.77259 8.94166 5.05833C9.22743 5.34409 9.61914 5.48903 10.4026 5.77893L11 6L10.4026 6.22107C9.61914 6.51097 9.22743 6.65592 8.94166 6.94167C8.65589 7.22741 8.51094 7.61913 8.22106 8.40255L8 9L7.77894 8.40255C7.48906 7.61913 7.34411 7.22741 7.05834 6.94167C6.77257 6.65592 6.38086 6.51097 5.59743 6.22107L5 6L5.59743 5.77893C6.38086 5.48903 6.77257 5.34409 7.05834 5.05833C7.34411 4.77259 7.48906 4.38087 7.77894 3.59745L8 3Z" />
+-        </>
+-      )}
+-      {kind === 'tidy' && (
+-        <>
+-          <path d="M4 5H20" />
+-          <path d="M4 9H16" />
+-          <path d="M4 13H11" />
+-          <path d="M4 17H10" />
+-        </>
+-      )}
+-      {kind === 'mindmap' && (
+-        <>
+-          <rect x="2.5" y="9.5" width="6" height="5" rx="1.5" />
+-          <rect x="15.5" y="4" width="6" height="5" rx="1.5" />
+-          <rect x="15.5" y="15" width="6" height="5" rx="1.5" />
+-          <path d="M8.5 12h3.5M12 12V6.5h3.5M12 12v5.5h3.5" />
+-        </>
+-      )}
+-      {kind !== 'polish' && (
+-        <path d="M17 14L17.2579 14.697C17.5961 15.611 17.7652 16.068 18.0986 16.4014C18.432 16.7348 18.889 16.9039 19.803 17.2421L20.5 17.5L19.803 17.7579C18.889 18.0961 18.432 18.2652 18.0986 18.5986C17.7652 18.932 17.5961 19.389 17.2579 20.303L17 21L16.7421 20.303C16.4039 19.389 16.2348 18.932 15.9014 18.5986C15.568 18.2652 15.111 18.0961 14.197 17.7579L13.5 17.5L14.197 17.2421C15.111 16.9039 15.568 16.7348 15.9014 16.4014C16.2348 16.068 16.4039 15.611 16.7421 14.697L17 14Z" />
+-      )}
+-    </svg>
+-  )
+-}
+ 
+ const MARKDOWN_THEME_LABELS: Record<Exclude<MarkdownTheme, 'default'>, string> = {
+   'notion-light': 'Notion Light',
+@@ -286,7 +236,6 @@
+   onToggleSpellcheck,
+   mdTheme,
+   onMarkdownTheme,
+-  onAiPreset,
+   sourceMode = false,
+   sourceHistory,
+   redactEnabled,
+@@ -360,19 +309,6 @@
+   // (pinned stroke paints 1.5px at this size per the suite-wide icon rules)
+   const ICON = 20
+ 
+-  // polish/tidy act on the selection when one exists (read at click time; the
+-  // mousedown preventDefault below keeps the selection alive); summarize stays whole-doc
+-  const hasSelection = () => !(editor?.state.selection.empty ?? true)
+-  const aiPresets = [
+-    { kind: 'summarize', btn: 'aiSummarizeBtn', prompt: () => t('aiSummarizePrompt') },
+-    {
+-      kind: 'tidy',
+-      btn: 'aiTidyBtn',
+-      prompt: () => t(hasSelection() ? 'aiTidySelectionPrompt' : 'aiTidyPrompt'),
+-    },
+-    { kind: 'mindmap', btn: 'aiMindMapBtn', prompt: () => t('aiMindMapPrompt') },
+-  ] as const
+-
+   return (
+     <div className={`ribbon ${collapse.rootClass}`} ref={collapse.rootRef}>
+       {/* quick-access row above the toolbar (save / undo / redo / autosave), same as the docs QAT row */}
+@@ -449,44 +385,6 @@
+       </div>
+ 
+       <div className="ribbon-body" data-ribbon-body="">
+-        <div className="ribbon-group">
+-          <div className="ribbon-group-items">
+-            <button
+-              type="button"
+-              className={`rb-big ai-entry${aiOpen ? ' active' : ''}`}
+-              data-tip={t('aiOpenAssistant')}
+-              disabled={disabled}
+-              onMouseDown={(e) => e.preventDefault()}
+-              onClick={onToggleAi}
+-            >
+-              <span className="rb-big-icon">
+-                <GensparkMark size={26} />
+-              </span>
+-              <span>Genspark AI</span>
+-            </button>
+-            {aiPresets.map(({ kind, btn, prompt }) => (
+-              <button
+-                key={kind}
+-                type="button"
+-                className="rb-big ai-entry"
+-                data-tip={t(btn)}
+-                disabled={off || state?.empty}
+-                onMouseDown={(e) => e.preventDefault()}
+-                onClick={() => onAiPreset(prompt())}
+-              >
+-                <span className="rb-big-icon">
+-                  <span className="ai-feature-icon" aria-hidden="true">
+-                    <AiFeatureIcon kind={kind} />
+-                  </span>
+-                </span>
+-                <span>{t(btn)}</span>
+-              </button>
+-            ))}
+-          </div>
+-        </div>
+-
+-        <div className="rb-sep" />
+-
+         {!sourceMode && (
+           <div className="ribbon-group">
+             <div className="ribbon-group-items">
+diff -ru ed_orig/markdown/markdown/src/renderer/main.tsx ed/markdown/markdown/src/renderer/main.tsx
+--- ed_orig/markdown/markdown/src/renderer/main.tsx	2026-11-03 07:31:04.126028709 +0000
++++ ed/markdown/markdown/src/renderer/main.tsx	2026-11-03 07:31:34.691134666 +0000
+@@ -16,13 +16,18 @@
+ import { installScreenTips } from '@genoffice/ui'
+ import type { MarkdownTheme } from '../shared/markdown-theme'
+ 
++// AI 모듈이 제거된 빌드에서 전역 참조가 남아 있어도 터지지 않도록 하는 더미
+ const dummyExtension = {
+   name: 'StreamingTailGuardExtension',
+   configure: () => dummyExtension,
+ }
+ ;(globalThis as any).StreamingTailGuardExtension = dummyExtension
+ 
+-installScreenTips()
++try {
++  installScreenTips()
++} catch (e) {
++  console.warn('[main] installScreenTips failed', e)
++}
+ 
+ function applyTheme(theme: UiTheme): void {
+   if (theme === 'system') document.documentElement.removeAttribute('data-theme')
+@@ -31,33 +36,43 @@
+ 
+ function applyMarkdownTheme(theme: MarkdownTheme): void {
+   // a picked paper theme overrides the light/dark document theme for the paper
+-  if (theme === 'default') document.documentElement.removeAttribute('data-markdown-theme')
++  if (!theme || theme === 'default') document.documentElement.removeAttribute('data-markdown-theme')
+   else document.documentElement.setAttribute('data-markdown-theme', theme)
+ }
+ 
+ function applyDocumentTheme(theme: DocTheme): void {
+   // data-doc-theme drives the preview paper (genoffice#1811); absent means 'follow' the UI theme
+-  if (theme === 'follow') document.documentElement.removeAttribute('data-doc-theme')
++  if (!theme || theme === 'follow') document.documentElement.removeAttribute('data-doc-theme')
+   else document.documentElement.setAttribute('data-doc-theme', theme)
+ }
+ 
++/** preload API 호출이 실패(미정의/거부)해도 부트스트랩이 멈추지 않게 fallback 반환 */
++async function safe<T>(fn: () => Promise<T> | T, fallback: T): Promise<T> {
++  try {
++    return (await fn()) ?? fallback
++  } catch {
++    return fallback
++  }
++}
++
+ void (async () => {
+   const [lang, theme, docTheme, mdTheme] = await Promise.all([
+-    window.markdownApi.getLanguage().catch(() => 'zh' as const),
+-    window.markdownApi.getTheme().catch(() => 'system' as const),
+-    window.markdownApi.getDocumentTheme?.().catch(() => 'follow' as const),
+-    window.markdownApi.getMarkdownTheme?.().catch(() => 'default' as const),
++    safe<Lang>(() => window.markdownApi.getLanguage() as Promise<Lang>, 'zh' as Lang),
++    safe<UiTheme>(() => window.markdownApi.getTheme(), 'system'),
++    safe<DocTheme>(() => window.markdownApi.getDocumentTheme!(), 'follow'),
++    safe<MarkdownTheme>(() => window.markdownApi.getMarkdownTheme!(), 'default'),
+   ])
+-  document.documentElement.lang = htmlLang(lang as Lang)
++  document.documentElement.lang = htmlLang(lang)
+   document.documentElement.dir = htmlDir(lang)
+   applyTheme(theme)
+-  applyDocumentTheme(docTheme ?? 'follow')
++  applyDocumentTheme(docTheme)
+   applyMarkdownTheme(mdTheme)
+-  window.markdownApi.onThemeChanged(applyTheme)
+-  window.markdownApi.onDocumentThemeChanged?.(applyDocumentTheme)
+-  await window.markdownApi
+-    ?.getAiPanelPrefs?.()
+-      .catch(() => { })
++  try {
++    window.markdownApi.onThemeChanged(applyTheme)
++    window.markdownApi.onDocumentThemeChanged?.(applyDocumentTheme)
++  } catch (e) {
++    console.warn('[main] theme listeners failed', e)
++  }
+ 
+   createRoot(document.getElementById('root')!).render(
+     <LocaleProvider initial={lang}>
